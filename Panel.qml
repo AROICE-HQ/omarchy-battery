@@ -36,6 +36,13 @@ Panel {
   property string gpuStatusText: ""
   property var drainSamples: []
 
+  // Resolve the laptop battery instead of assuming its native name contains
+  // "BAT". Apple Silicon uses macsmc-battery, and UPower may also expose
+  // peripheral batteries; only a device with `power supply: yes` is suitable
+  // for the charge-threshold API.
+  readonly property string chargeThresholdBatterySetup:
+    'battery="$(upower -e | grep "/battery_" | while IFS= read -r device; do LC_ALL=C upower -i "$device" | grep -q "power supply: *yes" && { printf "%s\\n" "$device"; break; }; done)"; test -n "$battery" || exit 1; '
+
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
     return !!(device && device.isPresent)
@@ -201,7 +208,8 @@ Panel {
   function refreshChargeThreshold() {
     if (!root.batteryInfo.threshold) return
     chargeThresholdReadProc.command = ["bash", "-c",
-      'gdbus call --system --dest org.freedesktop.UPower --object-path "$(upower -e | grep BAT | head -1)" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdEnabled']
+      root.chargeThresholdBatterySetup
+        + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdEnabled']
     chargeThresholdReadProc.running = true
   }
 
@@ -209,7 +217,8 @@ Panel {
     if (chargeThresholdActionProc.running) return
     var next = !root.chargeThresholdEnabled
     chargeThresholdActionProc.command = ["bash", "-c",
-      'gdbus call --system --dest org.freedesktop.UPower --object-path "$(upower -e | grep BAT | head -1)" --method org.freedesktop.UPower.Device.EnableChargeThreshold "$1"',
+      root.chargeThresholdBatterySetup
+        + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.UPower.Device.EnableChargeThreshold "$1"',
       "_", next ? "true" : "false"]
     chargeThresholdActionProc.running = true
   }
