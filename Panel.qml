@@ -26,7 +26,7 @@ Panel {
   readonly property real openPanelIndicatorWidth: showPercentage && !button.vertical ? button.glyphPaintedWidth : 0
 
   // ---- Charge threshold toggle, Quick Dim, Travel Mode, GPU status, watts
-  //      history -- new in this fork, not present in the built-in widget.
+  //      history, and application impact -- not present in the built-in widget.
   property bool chargeThresholdEnabled: false
   property bool quickDimActive: false
   property var quickDimSavedBrightness: null
@@ -35,6 +35,10 @@ Panel {
   property bool hybridGpuPresent: false
   property string gpuStatusText: ""
   property var drainSamples: []
+  property var powerImpactApps: []
+  property var batteryTemperature: null
+  readonly property string powerImpactScript: String(Qt.resolvedUrl("power-impact.sh")).replace("file://", "")
+  readonly property string batteryTemperatureScript: String(Qt.resolvedUrl("battery-temperature.sh")).replace("file://", "")
 
   // Resolve the laptop battery instead of assuming its native name contains
   // "BAT". Apple Silicon uses macsmc-battery, and UPower may also expose
@@ -68,12 +72,12 @@ Panel {
 
   function batteryIcon() {
     var device = UPower.displayDevice
-    return Model.batteryIcon(device, root.discharging, upowerStates())
+    return Model.batteryIcon(device, root.discharging, upowerStates(), root.chargeThresholdEnabled)
   }
 
   function modeLabel() {
     var device = UPower.displayDevice
-    return Model.modeLabel(device, root.discharging, upowerStates())
+    return Model.modeLabel(device, root.discharging, upowerStates(), root.chargeThresholdEnabled)
   }
 
   function profileIcon(name) {
@@ -90,7 +94,7 @@ Panel {
   }
   readonly property bool chargeThresholdActive: {
     var device = UPower.displayDevice
-    return Model.chargeThresholdActive(device, root.discharging, upowerStates())
+    return Model.chargeThresholdActive(device, root.discharging, upowerStates(), root.chargeThresholdEnabled)
   }
   readonly property bool batteryFull: fullyCharged || (!root.discharging && batteryFraction >= 1)
   readonly property bool batteryFlowIdle: batteryFull || chargeThresholdActive
@@ -157,6 +161,10 @@ Panel {
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
     if (!systemProc.running) systemProc.running = true
+    if (opened) {
+      if (!powerImpactProc.running) powerImpactProc.running = true
+      if (!batteryTemperatureProc.running) batteryTemperatureProc.running = true
+    }
   }
 
   function updateKeyValue(raw, targetName) {
@@ -274,6 +282,14 @@ Panel {
   function recordDrainSample() {
     var watts = Model.parseWattsRate(root.batteryInfo.rate)
     root.drainSamples = Model.appendDrainSample(root.drainSamples, watts, Date.now() / 1000, 600)
+  }
+
+  function updatePowerImpact(raw) {
+    root.powerImpactApps = Model.parsePowerImpact(raw)
+  }
+
+  function updateBatteryTemperature(raw) {
+    root.batteryTemperature = Model.parseBatteryTemperature(raw)
   }
 
   IpcHandler {
@@ -412,6 +428,18 @@ Panel {
           : ""
       }
     }
+  }
+
+  Process {
+    id: powerImpactProc
+    command: [root.powerImpactScript]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updatePowerImpact(text) }
+  }
+
+  Process {
+    id: batteryTemperatureProc
+    command: [root.batteryTemperatureScript]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateBatteryTemperature(text) }
   }
 
   Component.onCompleted: hybridGpuCheckProc.running = true
@@ -568,7 +596,7 @@ Panel {
           Text {
             id: heroPercent
             textFormat: Text.PlainText
-            text: root.batteryInfo.percentage || "—"
+            text: Math.round(root.batteryFraction * 100) + "%"
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.displayLarge
@@ -631,18 +659,23 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair { label: "Battery size"; value: root.batteryInfo.size || "" }
             InfoPair { label: "Charge cycles"; value: root.batteryInfo.cycles || "—" }
+            InfoPair {
+              visible: root.batteryTemperature !== null
+              label: "Temperature"
+              value: root.batteryTemperature !== null ? root.batteryTemperature.toFixed(1) + "°C" : ""
+            }
           }
 
           Column {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
             InfoPair {
-              label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
-              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "-") : (root.batteryFlowIdle ? "-" : (root.batteryInfo.time || "—"))
+              label: root.chargeThresholdActive ? "Charge limit" : (root.batteryFull ? "State" : (root.discharging ? "Time left" : "Time to full"))
+              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "-") : (root.batteryFull ? "Fully charged" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
-              label: root.chargeThresholdActive ? "Battery state" : (root.discharging ? "Discharging" : "Charging")
-              value: root.chargeThresholdActive ? "Holding" : (root.batteryFull ? "-" : (root.batteryInfo.rate || ""))
+              label: root.chargeThresholdActive ? "Battery state" : (root.batteryFull ? "Charge rate" : (root.discharging ? "Discharging" : "Charging"))
+              value: root.chargeThresholdActive ? "Holding" : (root.batteryInfo.rate || "0W")
             }
           }
         }
@@ -877,20 +910,77 @@ Panel {
             }
           }
         }
+
+        // Linux does not expose reliable per-app watts, so rank applications
+        // by CPU time consumed during a one-second sample. Sampling runs only
+        // while this panel is open.
+        Item {
+          visible: root.powerImpactApps.length > 0
+          width: parent.width
+          height: visible ? powerImpactColumn.implicitHeight : 0
+
+          Column {
+            id: powerImpactColumn
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSeparator { foreground: root.bar.foreground }
+
+            PanelSectionHeader {
+              text: "POWER IMPACT (RECENT CPU)"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Repeater {
+              model: root.powerImpactApps
+              delegate: InfoPair {
+                required property var modelData
+                label: modelData.name
+                value: modelData.impact + "  ·  " + modelData.cpu.toFixed(0) + "% CPU"
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "Estimate from recent CPU activity; applications do not expose exact watts."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: root.bar.foreground
+              opacity: 0.45
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+        }
       }
     }
   }
 
-  component InfoPair: Row {
+  component InfoPair: Item {
     property string label: ""
     property string value: ""
 
     width: parent.width
-    spacing: Style.space(8)
+    implicitHeight: Math.max(infoLabel.implicitHeight, infoValue.implicitHeight)
 
-    InfoLabel { text: label }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    InfoValue { text: value }
+    InfoLabel {
+      id: infoLabel
+      text: label
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.max(0, parent.width - infoValue.width - Style.space(8))
+      elide: Text.ElideRight
+    }
+    InfoValue {
+      id: infoValue
+      text: value
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.min(implicitWidth, parent.width * 0.65)
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+    }
   }
 
   component InfoLabel: Text {

@@ -71,6 +71,12 @@ New in this plugin:
 - **Power draw history** — a short in-memory sparkline of the last 10
   minutes' draw, plus a live watts readout. No database, no persistence;
   it's gone the moment the shell restarts.
+- **Power impact** — ranks the three busiest applications from a recent
+  one-second CPU sample, grouped by process name. It samples only while the
+  panel is open and labels the result as an estimate rather than pretending
+  Linux exposes exact per-application watts.
+- **Battery temperature** — shows the battery's real temperature sensor when
+  the hardware exposes it through Linux's power-supply interface.
 
 ## Install
 
@@ -127,6 +133,13 @@ pill to open the panel, click a profile pill to switch it.
   `omarchy-battery-status --shell` sample (the same one the built-in
   widget's stats row shows as text) and keeps a rolling 10-minute window
   of it in memory — no new subprocess, no database.
+- **Power impact**: `power-impact.sh` reads per-process CPU counters twice,
+  one second apart, groups the deltas by application name, and returns the
+  three busiest groups. It runs only while the panel is open. CPU activity is
+  a useful power proxy, not a per-application watt measurement.
+- **Battery temperature**: `battery-temperature.sh` reads the first available
+  `BAT*/temp` sensor, converts the Linux tenths-of-a-degree value to Celsius,
+  and emits nothing on unsupported hardware so the row stays hidden.
 - **Settings**: none of the five add persisted preferences. Charge
   threshold reflects live hardware state; Quick Dim/Travel Mode are
   session-only toggles; GPU status and power draw are live/derived.

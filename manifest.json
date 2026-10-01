@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "aryan-techie",
   "license": "MIT",
-  "description": "Battery, power profile, and system stats, plus a charge-threshold toggle, Quick Dim, Travel Mode, hybrid-GPU status, and live watts draw with a short drain history.",
+  "description": "Battery, power profile, temperature, and system stats, plus charge protection, quick actions, live watts history, and application power impact.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Better Battery",
-    "description": "Battery/profile stats plus charge-threshold toggle, Quick Dim, Travel Mode, GPU status, watts draw",
+    "description": "Battery stats and temperature, charge protection, quick actions, watts history, and application power impact",
     "category": "System",
     "allowMultiple": false
   }

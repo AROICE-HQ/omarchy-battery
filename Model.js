@@ -49,10 +49,10 @@ function batteryFraction(device) {
   return device && device.isPresent ? Math.max(0, Math.min(1, device.percentage)) : 0
 }
 
-function chargeThresholdActive(device, onBattery, states) {
+function chargeThresholdActive(device, onBattery, states, thresholdEnabled) {
   var d = device || {}
   var s = states || {}
-  if (!(d && d.isPresent && !onBattery)) return false
+  if (!(d && d.isPresent && !onBattery && thresholdEnabled === true)) return false
 
   var fraction = batteryFraction(d)
   if (d.state === s.Discharging) return false
@@ -63,14 +63,14 @@ function chargeThresholdActive(device, onBattery, states) {
   return Number(d.changeRate || 0) <= 0.2 || Number(d.timeToFull || 0) >= 8 * 60 * 60
 }
 
-function batteryIcon(device, onBattery, states) {
+function batteryIcon(device, onBattery, states, thresholdEnabled) {
   var d = device || {}
   if (!d.isPresent) return ""
 
   var chargingIcons = ["󰢜", "󰂆", "󰂇", "󰂈", "󰢝", "󰂉", "󰢞", "󰂊", "󰂋", "󰂅"]
   var defaultIcons = ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"]
   var index = Math.max(0, Math.min(9, Math.floor(d.percentage * 10)))
-  var threshold = chargeThresholdActive(d, onBattery, states)
+  var threshold = chargeThresholdActive(d, onBattery, states, thresholdEnabled)
 
   if (threshold) return defaultIcons[index]
   if (d.state === states.FullyCharged) return "󰂅"
@@ -78,14 +78,14 @@ function batteryIcon(device, onBattery, states) {
   return defaultIcons[index]
 }
 
-function modeLabel(device, onBattery, states) {
+function modeLabel(device, onBattery, states, thresholdEnabled) {
   var d = device || {}
   if (!d.isPresent) return ""
 
   var percentage = d.isPresent ? d.percentage : 0
-  if (chargeThresholdActive(d, onBattery, states)) return "Threshold"
+  if (chargeThresholdActive(d, onBattery, states, thresholdEnabled)) return "Threshold"
   if (onBattery) return "On battery"
-  if (!onBattery && percentage >= 1) return "Fully charged"
+  if (d.state === states.FullyCharged || percentage >= 1) return "Fully charged"
   return "Charging"
 }
 
@@ -128,6 +128,27 @@ function parseWattsRate(rateText) {
   return isFinite(value) ? value : null
 }
 
+// The sampler emits one TSV row per grouped application: display name, CPU
+// percentage, and impact band. This remains an estimate because Linux exposes
+// whole-system battery watts, not trustworthy per-process watt meters.
+function parsePowerImpact(raw) {
+  var rows = []
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var parts = lines[i].split("\t")
+    if (parts.length < 3 || !parts[0]) continue
+    var cpu = parseFloat(parts[1])
+    if (!isFinite(cpu)) continue
+    rows.push({ name: parts[0], cpu: cpu, impact: parts[2] })
+  }
+  return rows
+}
+
+function parseBatteryTemperature(raw) {
+  var value = parseFloat(String(raw || "").trim())
+  return isFinite(value) && value >= -20 && value <= 100 ? value : null
+}
+
 // Appends one sample and drops anything older than maxAgeSeconds -- a
 // fixed-size rolling window instead of an ever-growing array.
 function appendDrainSample(samples, watts, now, maxAgeSeconds) {
@@ -153,6 +174,8 @@ if (typeof module !== "undefined") {
     parseBrightnessPercent: parseBrightnessPercent,
     monitorKeywordLine: monitorKeywordLine,
     parseWattsRate: parseWattsRate,
+    parsePowerImpact: parsePowerImpact,
+    parseBatteryTemperature: parseBatteryTemperature,
     appendDrainSample: appendDrainSample
   }
 }

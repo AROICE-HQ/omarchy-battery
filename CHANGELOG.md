@@ -2,6 +2,28 @@
 
 All notable user-facing changes to this plugin. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Require UPower's charge-threshold switch to be enabled before labeling a
+  partly charged battery as "Holding". This avoids mistaking a battery that
+  reports `fully-charged` below 99% for an active charge limit.
+- Show "Battery state / Fully charged" and the zero charge rate instead of the
+  contradictory "Time to full / Charging" rows when the battery is full.
+- Round the panel percentage from the same live UPower value as the bar, so a
+  value such as 92.99% no longer appears as 92% in one place and 93% in another.
+- Constrain stat labels and values to their row, preventing long state text
+  from being clipped at the panel's right edge.
+
+### Added
+
+- Add a Power Impact section that groups recent process CPU activity by
+  application and shows the three busiest applications while the panel is
+  open, with an explicit estimate disclaimer.
+- Show the battery's real temperature in the stats when Linux exposes a
+  battery temperature sensor.
+
 ## v0.1.0 — Initial release
 
 ### Added
