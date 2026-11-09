@@ -53,9 +53,9 @@ New in this plugin:
 
 - **Charge-threshold toggle** — turns firmware-backed charge protection on
   or off, at whatever start/end percentages your hardware already reports.
-  Goes through UPower's own `EnableChargeThreshold` method (the same
-  DBus/polkit path UPower ships for this), not a raw sysfs write. Only
-  shown when your battery actually reports a configured threshold.
+  Prefers UPower's own `EnableChargeThreshold` method and falls back to
+  the ASUS `asusd` daemon when UPower cannot control the limit. Never
+  writes sysfs directly. Only shown when a supported backend is detected.
 - **Quick Dim** — one click drops your laptop panel to 40% brightness;
   click again to restore the exact value it was at. Reads the current
   brightness first, so a setup with no laptop panel active (docked to an
@@ -101,6 +101,15 @@ pill to open the panel, click a profile pill to switch it.
 
 - **Charge threshold**: flip the toggle under Power Profile. Only appears
   if your hardware supports it.
+  On ASUS laptops managed by `asusd`, switching it off requests a one-shot
+  full charge; switching it on restores your previous limit (not a fixed
+  80%). The plugin saves that limit in its bar settings across shell
+  restarts. If it first sees your battery already set to 100%, set your
+  normal limit with `asusctl` and reopen the panel before using the toggle;
+  the plugin never guesses a protection percentage.
+  ASUS normally restores the limit on unplug, but affected `asusd` versions
+  have a [known restoration bug](https://github.com/OpenGamingCollective/asusctl/issues/439).
+  Check the toggle afterward and turn protection back on manually if needed.
 - **Quick Dim** / **Travel Mode**: one click each in Quick Actions; click
   again to undo. Both are safe to leave on indefinitely — closing the
   panel or restarting the shell doesn't lose the saved state, only a
@@ -111,12 +120,21 @@ pill to open the panel, click a profile pill to switch it.
 
 ## How it works
 
-- **Charge threshold**: reads/writes UPower's `ChargeThresholdEnabled`
+- **Charge threshold**: `charge-threshold.sh` first checks UPower's
+  `ChargeThresholdSupported` capability, then reads/writes `ChargeThresholdEnabled`
   property and `EnableChargeThreshold` method via `gdbus call` against
   `org.freedesktop.UPower`, targeting whichever battery `upower -e`
-  reports. The actual start/end percentages come from
+  reports (excluding peripheral batteries). The actual start/end percentages come from
   `omarchy-battery-status --shell`'s existing `threshold` field — this
   plugin only toggles enforcement, it doesn't set arbitrary percentages.
+  When UPower does not support charge control, the helper checks whether
+  `xyz.ljones.Asusd` advertises `ChargeControlEndThreshold`. On supported
+  ASUS systems it reads that property, calls `OneShotFullCharge()` to
+  temporarily disable protection, and restores the saved limit with the
+  property setter. All operations use the system D-Bus and existing daemon
+  permissions; neither root sysfs access nor a new privileged helper is needed.
+  A failed write is reported in the panel, and state is re-read rather than
+  optimistically flipping the toggle.
 - **Quick Dim / Travel Mode brightness**: `omarchy brightness display
   --monitor eDP-2`, read before changing (to know what to restore) and
   written after. A read that can't resolve a number — no internal panel
@@ -140,8 +158,9 @@ pill to open the panel, click a profile pill to switch it.
 - **Battery temperature**: `battery-temperature.sh` reads the first available
   `BAT*/temp` sensor, converts the Linux tenths-of-a-degree value to Celsius,
   and emits nothing on unsupported hardware so the row stays hidden.
-- **Settings**: none of the five add persisted preferences. Charge
-  threshold reflects live hardware state; Quick Dim/Travel Mode are
+- **Settings**: charge threshold reflects live hardware state. The ASUS
+  fallback saves `asusChargeLimit` in the widget's settings for manual
+  restoration after a shell restart. Quick Dim/Travel Mode are
   session-only toggles; GPU status and power draw are live/derived.
 
 ## External dependencies
@@ -150,8 +169,19 @@ Runs `gdbus`, `omarchy brightness`, `hyprctl`, `omarchy hw`, `upower`, and
 (only on hybrid-GPU hardware) `nvidia-smi` via Quickshell's `Process` — all
 standard on any Omarchy install except `nvidia-smi`, which is only invoked
 when `omarchy hw hybrid gpu` already confirms NVIDIA hardware is present.
-Nothing here touches the network or needs elevated privileges beyond what
-UPower's own polkit policy already grants for charge-threshold changes.
+Nothing here touches the network. Charge-threshold changes use UPower's
+polkit policy or the existing `asusd` system D-Bus policy. `asusd` is optional
+and only used when it advertises charge-control support.
+
+## Tests
+
+```
+node tests/charge-threshold.test.js
+python3 -m unittest discover -s tests -v
+bash -n charge-threshold.sh
+```
+
+The helper tests mock D-Bus tools; they do not change real charge limits.
 
 ## Uninstalling
 

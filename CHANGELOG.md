@@ -6,6 +6,9 @@ All notable user-facing changes to this plugin. Format loosely follows [Keep a C
 
 ### Fixed
 
+- Detect charge-control capabilities instead of assuming a reported threshold
+  means UPower can toggle it. Keep the control available while disabled and
+  show failed actions without optimistically changing its state.
 - Require UPower's charge-threshold switch to be enabled before labeling a
   partly charged battery as "Holding". This avoids mistaking a battery that
   reports `fully-charged` below 99% for an active charge limit.
@@ -18,6 +21,9 @@ All notable user-facing changes to this plugin. Format loosely follows [Keep a C
 
 ### Added
 
+- Fall back to `asusd` charge control on ASUS systems unsupported by UPower.
+  Request a one-shot full charge and save the existing protection percentage
+  for manual restoration, including after a shell restart.
 - Add a Power Impact section that groups recent process CPU activity by
   application and shows the three busiest applications while the panel is
   open, with an explicit estimate disclaimer.
