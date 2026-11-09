@@ -89,15 +89,23 @@ function modeLabel(device, onBattery, states, thresholdEnabled) {
   return "Charging"
 }
 
-// ---- Charge-threshold toggle. This calls UPower's own
-// EnableChargeThreshold DBus method (UPower ships its own polkit policy for
-// it), not a raw sysfs write -- see Panel.qml for the full reasoning.
-// `gdbus call` prints a boolean property read as "(<true>,)" / "(<false>,)".
-function parseGdbusBoolean(raw) {
-  var text = String(raw || "")
-  if (text.indexOf("true") !== -1) return true
-  if (text.indexOf("false") !== -1) return false
-  return null
+// ---- Charge-threshold toggle.
+function validAsusChargeLimit(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= 20 && value < 100 ? value : 0
+}
+
+function parseChargeThreshold(raw) {
+  var values = parseKeyValue(raw)
+  var unsupported = { backend: "none", enabled: false, limit: 0 }
+  if (values.enabled !== "true" && values.enabled !== "false") return unsupported
+  if (values.backend === "upower")
+    return { backend: "upower", enabled: values.enabled === "true", limit: 0 }
+  if (values.backend !== "asus" || !/^[0-9]{2,3}$/.test(values.limit || "")) return unsupported
+  var limit = Number(values.limit)
+  if (limit !== 100 && !validAsusChargeLimit(limit)) return unsupported
+  if ((values.enabled === "true") !== (limit < 100)) return unsupported
+  return { backend: "asus", enabled: limit < 100, limit: limit }
 }
 
 // ---- Quick Dim / Travel Mode brightness. "40%" / "40" -> 40, or null on
@@ -170,7 +178,8 @@ if (typeof module !== "undefined") {
     chargeThresholdActive: chargeThresholdActive,
     batteryIcon: batteryIcon,
     modeLabel: modeLabel,
-    parseGdbusBoolean: parseGdbusBoolean,
+    validAsusChargeLimit: validAsusChargeLimit,
+    parseChargeThreshold: parseChargeThreshold,
     parseBrightnessPercent: parseBrightnessPercent,
     monitorKeywordLine: monitorKeywordLine,
     parseWattsRate: parseWattsRate,

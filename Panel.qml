@@ -28,6 +28,14 @@ Panel {
   // ---- Charge threshold toggle, Quick Dim, Travel Mode, GPU status, watts
   //      history, and application impact -- not present in the built-in widget.
   property bool chargeThresholdEnabled: false
+  property string chargeThresholdBackend: "none"
+  property int chargeThresholdLimit: 0
+  property string chargeThresholdError: ""
+  readonly property string chargeLimitLabel: chargeThresholdBackend === "asus"
+    ? chargeThresholdLimit + "%" : (batteryInfo.threshold || "")
+  readonly property int asusChargeLimit: Model.validAsusChargeLimit(setting("asusChargeLimit", 0))
+  readonly property bool chargeThresholdCanToggle: batteryPresent && chargeThresholdBackend !== "none"
+    && (chargeThresholdBackend !== "asus" || chargeThresholdEnabled || asusChargeLimit > 0)
   property bool quickDimActive: false
   property var quickDimSavedBrightness: null
   property bool travelModeActive: false
@@ -40,12 +48,7 @@ Panel {
   readonly property string powerImpactScript: String(Qt.resolvedUrl("power-impact.sh")).replace("file://", "")
   readonly property string batteryTemperatureScript: String(Qt.resolvedUrl("battery-temperature.sh")).replace("file://", "")
 
-  // Resolve the laptop battery instead of assuming its native name contains
-  // "BAT". Apple Silicon uses macsmc-battery, and UPower may also expose
-  // peripheral batteries; only a device with `power supply: yes` is suitable
-  // for the charge-threshold API.
-  readonly property string chargeThresholdBatterySetup:
-    'battery="$(upower -e | grep "/battery_" | while IFS= read -r device; do LC_ALL=C upower -i "$device" | grep -q "power supply: *yes" && { printf "%s\\n" "$device"; break; }; done)"; test -n "$battery" || exit 1; '
+  readonly property string chargeThresholdScript: String(Qt.resolvedUrl("charge-threshold.sh")).replace("file://", "")
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -158,6 +161,7 @@ Panel {
   function refresh() {
     if (!batteryPresent) return
 
+    refreshChargeThreshold()
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
     if (!systemProc.running) systemProc.running = true
@@ -175,7 +179,6 @@ Panel {
     if (targetName === "battery") {
       batteryInfo = next
       root.recordDrainSample()
-      root.refreshChargeThreshold()
     } else {
       systemInfo = next
     }
@@ -206,28 +209,33 @@ Panel {
     if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
   }
 
-  // ---- Charge threshold toggle. Calls UPower's own EnableChargeThreshold
-  // DBus method (UPower ships its own polkit policy for it) rather than
-  // writing the sysfs threshold file directly, which is root-owned on this
-  // hardware and every other laptop checked. The value itself (75-80% here)
-  // is whatever UPower/firmware already has configured -- this only flips
-  // whether it's *enforced*, matching what omarchy-battery-status's
-  // "threshold" field already reports as configured.
+  // UPower first, asusd fallback. Capability probing must not depend on the
+  // status script's threshold field: that can disappear while disabled.
   function refreshChargeThreshold() {
-    if (!root.batteryInfo.threshold) return
-    chargeThresholdReadProc.command = ["bash", "-c",
-      root.chargeThresholdBatterySetup
-        + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdEnabled']
+    if (!batteryPresent || chargeThresholdReadProc.running || chargeThresholdActionProc.running) return
     chargeThresholdReadProc.running = true
   }
 
+  function updateChargeThreshold(raw) {
+    var state = Model.parseChargeThreshold(raw)
+    chargeThresholdBackend = state.backend
+    chargeThresholdEnabled = state.enabled
+    chargeThresholdLimit = state.limit
+    // Save before one-shot mode replaces the live limit with 100. Persist it
+    // so the user can restore protection even after a shell restart or an
+    // asusd version that fails to restore its own saved limit on unplug.
+    if (state.backend === "asus" && state.enabled && state.limit !== asusChargeLimit) {
+      root.settings = Object.assign({}, root.settings, { asusChargeLimit: state.limit })
+      if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
+    }
+  }
+
   function toggleChargeThreshold() {
-    if (chargeThresholdActionProc.running) return
+    if (!chargeThresholdCanToggle || chargeThresholdReadProc.running || chargeThresholdActionProc.running) return
     var next = !root.chargeThresholdEnabled
-    chargeThresholdActionProc.command = ["bash", "-c",
-      root.chargeThresholdBatterySetup
-        + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.UPower.Device.EnableChargeThreshold "$1"',
-      "_", next ? "true" : "false"]
+    chargeThresholdError = ""
+    chargeThresholdActionProc.command = [root.chargeThresholdScript, "set",
+      chargeThresholdBackend, next ? "true" : "false", String(asusChargeLimit)]
     chargeThresholdActionProc.running = true
   }
 
@@ -317,7 +325,15 @@ Panel {
     }
   }
 
-  onBatteryPresentChanged: if (!batteryPresent) close()
+  onBatteryPresentChanged: {
+    if (batteryPresent) refreshChargeThreshold()
+    else close()
+  }
+
+  Connections {
+    target: UPower
+    function onOnBatteryChanged() { root.refreshChargeThreshold() }
+  }
 
   visible: batteryPresent
   implicitWidth: batteryPresent ? button.implicitWidth : 0
@@ -348,16 +364,20 @@ Panel {
 
   Process {
     id: chargeThresholdReadProc
+    command: [root.chargeThresholdScript, "read"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: {
-        var value = Model.parseGdbusBoolean(text)
-        if (value !== null) root.chargeThresholdEnabled = value
-      }
+      onStreamFinished: root.updateChargeThreshold(text)
     }
   }
 
-  Process { id: chargeThresholdActionProc; onExited: root.refreshChargeThreshold() }
+  Process {
+    id: chargeThresholdActionProc
+    onExited: function(exitCode) {
+      root.chargeThresholdError = exitCode === 0 ? "" : "Could not apply the requested charge limit."
+      root.refresh()
+    }
+  }
 
   Process {
     id: quickDimReadProc
@@ -442,7 +462,10 @@ Panel {
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateBatteryTemperature(text) }
   }
 
-  Component.onCompleted: hybridGpuCheckProc.running = true
+  Component.onCompleted: {
+    hybridGpuCheckProc.running = true
+    refreshChargeThreshold()
+  }
 
   Timer {
     interval: 5000
@@ -671,7 +694,7 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair {
               label: root.chargeThresholdActive ? "Charge limit" : (root.batteryFull ? "State" : (root.discharging ? "Time left" : "Time to full"))
-              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "-") : (root.batteryFull ? "Fully charged" : (root.batteryInfo.time || "—"))
+              value: root.chargeThresholdActive ? (root.chargeLimitLabel || "—") : (root.batteryFull ? "Fully charged" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
               label: root.chargeThresholdActive ? "Battery state" : (root.batteryFull ? "Charge rate" : (root.discharging ? "Discharging" : "Charging"))
@@ -733,12 +756,9 @@ Panel {
           }
         }
 
-        // ---------- Charge threshold toggle. Only shown once the battery
-        //            actually reports a configured threshold -- the same
-        //            gate omarchy-battery-status already applies before
-        //            printing the "threshold" field. ----------
+        // ---------- Charge threshold toggle, including ASUS fallback ----------
         Item {
-          visible: !!root.batteryInfo.threshold
+          visible: root.chargeThresholdBackend !== "none" || root.chargeThresholdError !== ""
           width: parent.width
           height: visible ? chargeThresholdColumn.implicitHeight : 0
 
@@ -750,16 +770,35 @@ Panel {
             PanelSeparator { foreground: root.bar.foreground }
 
             Toggle {
+              visible: root.chargeThresholdBackend !== "none"
               width: parent.width
               label: "Charge threshold"
-              description: root.batteryInfo.threshold
-                ? ("Hold at " + root.batteryInfo.threshold + " to protect battery health")
-                : "Hold charge below the firmware limit"
+              description: root.chargeThresholdBackend === "asus"
+                ? (root.chargeThresholdEnabled
+                  ? "Hold at " + root.chargeLimitLabel + " to protect battery health"
+                  : (root.asusChargeLimit > 0
+                    ? "Full charge allowed; enable to restore " + root.asusChargeLimit + "%"
+                    : "Set a normal charge limit in asusctl first; no saved limit to restore"))
+                : (root.chargeLimitLabel
+                  ? "Hold at " + root.chargeLimitLabel + " to protect battery health"
+                  : "Hold charge below the firmware limit")
               checked: root.chargeThresholdEnabled
+              enabled: root.chargeThresholdCanToggle && !chargeThresholdReadProc.running && !chargeThresholdActionProc.running
               foreground: root.bar.foreground
               accent: Color.accent
               fontFamily: root.bar.fontFamily
               onClicked: root.toggleChargeThreshold()
+            }
+
+            Text {
+              width: parent.width
+              visible: text !== ""
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              text: root.chargeThresholdError
             }
           }
         }
