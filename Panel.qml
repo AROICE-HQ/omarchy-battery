@@ -31,8 +31,10 @@ Panel {
   property string chargeThresholdBackend: "none"
   property int chargeThresholdLimit: 0
   property string chargeThresholdError: ""
+  readonly property string chargeLimitLabel: chargeThresholdBackend === "asus"
+    ? chargeThresholdLimit + "%" : (batteryInfo.threshold || "")
   readonly property int asusChargeLimit: Model.validAsusChargeLimit(setting("asusChargeLimit", 0))
-  readonly property bool chargeThresholdCanToggle: chargeThresholdBackend !== "none"
+  readonly property bool chargeThresholdCanToggle: batteryPresent && chargeThresholdBackend !== "none"
     && (chargeThresholdBackend !== "asus" || chargeThresholdEnabled || asusChargeLimit > 0)
   property bool quickDimActive: false
   property var quickDimSavedBrightness: null
@@ -159,6 +161,7 @@ Panel {
   function refresh() {
     if (!batteryPresent) return
 
+    refreshChargeThreshold()
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
     if (!systemProc.running) systemProc.running = true
@@ -176,7 +179,6 @@ Panel {
     if (targetName === "battery") {
       batteryInfo = next
       root.recordDrainSample()
-      root.refreshChargeThreshold()
     } else {
       systemInfo = next
     }
@@ -210,7 +212,7 @@ Panel {
   // UPower first, asusd fallback. Capability probing must not depend on the
   // status script's threshold field: that can disappear while disabled.
   function refreshChargeThreshold() {
-    if (chargeThresholdReadProc.running || chargeThresholdActionProc.running) return
+    if (!batteryPresent || chargeThresholdReadProc.running || chargeThresholdActionProc.running) return
     chargeThresholdReadProc.running = true
   }
 
@@ -232,7 +234,7 @@ Panel {
     if (!chargeThresholdCanToggle || chargeThresholdReadProc.running || chargeThresholdActionProc.running) return
     var next = !root.chargeThresholdEnabled
     chargeThresholdError = ""
-    chargeThresholdActionProc.command = ["bash", root.chargeThresholdScript, "set",
+    chargeThresholdActionProc.command = [root.chargeThresholdScript, "set",
       chargeThresholdBackend, next ? "true" : "false", String(asusChargeLimit)]
     chargeThresholdActionProc.running = true
   }
@@ -323,7 +325,15 @@ Panel {
     }
   }
 
-  onBatteryPresentChanged: if (!batteryPresent) close()
+  onBatteryPresentChanged: {
+    if (batteryPresent) refreshChargeThreshold()
+    else close()
+  }
+
+  Connections {
+    target: UPower
+    function onOnBatteryChanged() { root.refreshChargeThreshold() }
+  }
 
   visible: batteryPresent
   implicitWidth: batteryPresent ? button.implicitWidth : 0
@@ -354,7 +364,7 @@ Panel {
 
   Process {
     id: chargeThresholdReadProc
-    command: ["bash", root.chargeThresholdScript, "read"]
+    command: [root.chargeThresholdScript, "read"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateChargeThreshold(text)
@@ -364,8 +374,7 @@ Panel {
   Process {
     id: chargeThresholdActionProc
     onExited: function(exitCode) {
-      root.chargeThresholdError = exitCode === 0 ? "" : "Could not change the charge limit. Check the power service and permissions."
-      root.refreshChargeThreshold()
+      root.chargeThresholdError = exitCode === 0 ? "" : "Could not apply the requested charge limit."
       root.refresh()
     }
   }
@@ -453,7 +462,10 @@ Panel {
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateBatteryTemperature(text) }
   }
 
-  Component.onCompleted: hybridGpuCheckProc.running = true
+  Component.onCompleted: {
+    hybridGpuCheckProc.running = true
+    refreshChargeThreshold()
+  }
 
   Timer {
     interval: 5000
@@ -682,7 +694,7 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair {
               label: root.chargeThresholdActive ? "Charge limit" : (root.batteryFull ? "State" : (root.discharging ? "Time left" : "Time to full"))
-              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "-") : (root.batteryFull ? "Fully charged" : (root.batteryInfo.time || "—"))
+              value: root.chargeThresholdActive ? (root.chargeLimitLabel || "—") : (root.batteryFull ? "Fully charged" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
               label: root.chargeThresholdActive ? "Battery state" : (root.batteryFull ? "Charge rate" : (root.discharging ? "Discharging" : "Charging"))
@@ -758,16 +770,17 @@ Panel {
             PanelSeparator { foreground: root.bar.foreground }
 
             Toggle {
+              visible: root.chargeThresholdBackend !== "none"
               width: parent.width
               label: "Charge threshold"
               description: root.chargeThresholdBackend === "asus"
                 ? (root.chargeThresholdEnabled
-                  ? "Hold at " + root.chargeThresholdLimit + "% to protect battery health"
+                  ? "Hold at " + root.chargeLimitLabel + " to protect battery health"
                   : (root.asusChargeLimit > 0
                     ? "Full charge allowed; enable to restore " + root.asusChargeLimit + "%"
                     : "Set a normal charge limit in asusctl first; no saved limit to restore"))
-                : (root.batteryInfo.threshold
-                  ? "Hold at " + root.batteryInfo.threshold + " to protect battery health"
+                : (root.chargeLimitLabel
+                  ? "Hold at " + root.chargeLimitLabel + " to protect battery health"
                   : "Hold charge below the firmware limit")
               checked: root.chargeThresholdEnabled
               enabled: root.chargeThresholdCanToggle && !chargeThresholdReadProc.running && !chargeThresholdActionProc.running

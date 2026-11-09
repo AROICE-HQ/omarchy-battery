@@ -1,59 +1,76 @@
 #!/usr/bin/env bash
-# Prefer UPower's generic API; use asusd only when it advertises charge control.
-# Never write sysfs or guess a protection percentage.
-set -euo pipefail
+set -u
 export LC_ALL=C
 
+readonly upower_service=org.freedesktop.UPower
+readonly upower_device=org.freedesktop.UPower.Device
+readonly asus_service=xyz.ljones.Asusd
+readonly asus_path=/xyz/ljones
+readonly asus_platform=xyz.ljones.Platform
+readonly asus_threshold=ChargeControlEndThreshold
+
+system_bus() {
+  busctl --system --timeout=5s "$@"
+}
+
 upower_property() {
-  gdbus call --system --timeout 5 --dest org.freedesktop.UPower \
-    --object-path "$battery" --method org.freedesktop.DBus.Properties.Get \
-    org.freedesktop.UPower.Device "$1"
+  system_bus get-property "$upower_service" "$1" "$upower_device" "$2"
 }
 
-asus_call() {
-  gdbus call --system --timeout 5 --dest xyz.ljones.Asusd \
-    --object-path /xyz/ljones --method "$@"
+asus_bus() {
+  local operation=$1
+  shift
+  system_bus --auto-start=no "$operation" "$asus_service" "$asus_path" "$asus_platform" "$@"
 }
 
-find_battery() {
+find_system_battery() {
   local device
   while IFS= read -r device; do
-    [[ "$device" == /org/freedesktop/UPower/devices/battery_* ]] || continue
-    if [[ "$(gdbus call --system --timeout 5 --dest org.freedesktop.UPower \
-      --object-path "$device" --method org.freedesktop.DBus.Properties.Get \
-      org.freedesktop.UPower.Device PowerSupply 2>/dev/null)" == '(<true>,)' ]]; then
-      battery="$device"
+    [[ $device == /org/freedesktop/UPower/devices/battery_* ]] || continue
+    if [[ $(upower_property "$device" PowerSupply 2>/dev/null) == 'b true' ]]; then
+      printf '%s\n' "$device"
       return 0
     fi
-  done < <(upower -e)
+  done < <(upower -e 2>/dev/null)
   return 1
 }
 
+read_asus_limit() {
+  local value
+  value=$(asus_bus get-property "$asus_threshold") || return 1
+  [[ $value =~ ^y\ (100|[2-9][0-9])$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 detect_backend() {
-  local supported value
-  find_battery || return 1
-  if [[ "$(upower_property ChargeThresholdSupported 2>/dev/null)" == '(<true>,)' ]]; then
-    backend=upower
-    value="$(upower_property ChargeThresholdEnabled)" || return 1
+  local value
+  if battery=$(find_system_battery) &&
+     [[ $(upower_property "$battery" ChargeThresholdSupported 2>/dev/null) == 'b true' ]]; then
+    value=$(upower_property "$battery" ChargeThresholdEnabled) || return 1
     case "$value" in
-      '(<true>,)') enabled=true ;;
-      '(<false>,)') enabled=false ;;
+      'b true') enabled=true ;;
+      'b false') enabled=false ;;
       *) return 1 ;;
     esac
+    backend=upower
     limit=0
     return 0
   fi
 
-  supported="$(asus_call xyz.ljones.Platform.SupportedProperties 2>/dev/null)" || return 1
-  [[ "$supported" == *"'ChargeControlEndThreshold'"* ]] || return 1
-  value="$(asus_call org.freedesktop.DBus.Properties.Get \
-    xyz.ljones.Platform ChargeControlEndThreshold)" || return 1
-  [[ "$value" =~ ^\(\<byte\ 0x([[:xdigit:]]{2})\>\,\)$ ]] || return 1
-  limit=$((16#${BASH_REMATCH[1]}))
-  (( limit >= 20 && limit <= 100 )) || return 1
+  value=$(asus_bus call SupportedProperties 2>/dev/null) || return 1
+  [[ $value == as\ *\"$asus_threshold\"* ]] || return 1
+  limit=$(read_asus_limit) || return 1
   backend=asus
-  enabled=false
-  (( limit == 100 )) || enabled=true
+  if [[ $limit != 100 ]]; then
+    enabled=true
+  else
+    enabled=false
+  fi
+}
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
 }
 
 case "${1:-read}" in
@@ -65,28 +82,32 @@ case "${1:-read}" in
     fi
     ;;
   set)
-    # Re-detect before writing: never send an ASUS action to a UPower device
-    # (or vice versa) after the backend disappears or changes.
-    [[ $# == 4 && "$3" =~ ^(true|false)$ ]] || exit 1
-    detect_backend || exit 1
-    [[ "$backend" == "$2" ]] || exit 1
-    if [[ "$backend" == upower ]]; then
-      gdbus call --system --timeout 5 --dest org.freedesktop.UPower \
-        --object-path "$battery" --method org.freedesktop.UPower.Device.EnableChargeThreshold "$3"
-    else
-      [[ "$4" =~ ^[0-9]{2}$ ]] && (( 10#$4 >= 20 && 10#$4 < 100 )) || exit 1
-      if [[ "$3" == false ]]; then
-        # An external limit change needs a UI refresh before saving/restoring
-        # it. Do not override another client's newer choice with stale state.
-        (( limit == 10#$4 )) || exit 1
-        # No percentage argument: preserve asusd's normal limit for unplug.
-        asus_call xyz.ljones.Platform.OneShotFullCharge
-      else
-        (( limit == 100 )) || exit 1
-        asus_call org.freedesktop.DBus.Properties.Set xyz.ljones.Platform \
-          ChargeControlEndThreshold "<byte $4>"
-      fi
+    [[ $# == 4 && $2 =~ ^(upower|asus)$ && $3 =~ ^(true|false)$ ]] ||
+      fail "Usage: charge-threshold.sh set {upower|asus} {true|false} saved-limit"
+    detect_backend || fail "Charge control is unavailable"
+    [[ $backend == "$2" ]] || fail "The charge control backend changed"
+
+    if [[ $backend == upower ]]; then
+      system_bus --allow-interactive-authorization=yes --quiet call \
+        "$upower_service" "$battery" "$upower_device" EnableChargeThreshold b "$3"
+      exit $?
     fi
+
+    saved_limit=$4
+    [[ $saved_limit =~ ^[2-9][0-9]$ ]] || fail "Invalid saved ASUS charge limit"
+    if [[ $3 == false ]]; then
+      [[ $limit == "$saved_limit" ]] || fail "The ASUS charge limit changed"
+      asus_bus call OneShotFullCharge >/dev/null || exit 1
+      expected_limit=100
+    else
+      [[ $limit == 100 ]] || fail "The ASUS charge limit changed"
+      asus_bus set-property "$asus_threshold" y "$saved_limit" || exit 1
+      expected_limit=$saved_limit
+    fi
+
+    # asusd can acknowledge a one-shot request without changing the live limit.
+    [[ $(read_asus_limit) == "$expected_limit" ]] ||
+      fail "asusd did not apply the requested charge limit"
     ;;
-  *) exit 1 ;;
+  *) fail "Usage: charge-threshold.sh {read|set}" ;;
 esac

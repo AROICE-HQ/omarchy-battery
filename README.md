@@ -102,8 +102,8 @@ pill to open the panel, click a profile pill to switch it.
 - **Charge threshold**: flip the toggle under Power Profile. Only appears
   if your hardware supports it.
   On ASUS laptops managed by `asusd`, switching it off requests a one-shot
-  full charge; switching it on restores your previous limit (not a fixed
-  80%). The plugin saves that limit in its bar settings across shell
+  full charge, and switching it on restores your previous limit.
+  The plugin saves that limit in its bar settings across shell
   restarts. If it first sees your battery already set to 100%, set your
   normal limit with `asusctl` and reopen the panel before using the toggle;
   the plugin never guesses a protection percentage.
@@ -120,21 +120,17 @@ pill to open the panel, click a profile pill to switch it.
 
 ## How it works
 
-- **Charge threshold**: `charge-threshold.sh` first checks UPower's
-  `ChargeThresholdSupported` capability, then reads/writes `ChargeThresholdEnabled`
-  property and `EnableChargeThreshold` method via `gdbus call` against
-  `org.freedesktop.UPower`, targeting whichever battery `upower -e`
-  reports (excluding peripheral batteries). The actual start/end percentages come from
-  `omarchy-battery-status --shell`'s existing `threshold` field — this
-  plugin only toggles enforcement, it doesn't set arbitrary percentages.
-  When UPower does not support charge control, the helper checks whether
-  `xyz.ljones.Asusd` advertises `ChargeControlEndThreshold`. On supported
-  ASUS systems it reads that property, calls `OneShotFullCharge()` to
-  temporarily disable protection, and restores the saved limit with the
-  property setter. All operations use the system D-Bus and existing daemon
-  permissions; neither root sysfs access nor a new privileged helper is needed.
-  A failed write is reported in the panel, and state is re-read rather than
-  optimistically flipping the toggle.
+- **Charge threshold** uses `busctl` to talk to the system D-Bus. The
+  helper picks the first system battery listed by `upower -e`, checks
+  `ChargeThresholdSupported`, and reads `ChargeThresholdEnabled`. The
+  toggle calls `EnableChargeThreshold` with the requested state. The panel
+  displays the UPower percentages from `omarchy-battery-status --shell`.
+  If UPower lacks charge control, the helper looks for a running `asusd`
+  that advertises `ChargeControlEndThreshold`. The panel displays this
+  live ASUS limit. The helper calls `OneShotFullCharge()` for a full charge,
+  uses the property setter to restore the saved limit, and reads the ASUS
+  limit back after either action. The panel reports failed actions and
+  refreshes the toggle from the daemon.
 - **Quick Dim / Travel Mode brightness**: `omarchy brightness display
   --monitor eDP-2`, read before changing (to know what to restore) and
   written after. A read that can't resolve a number — no internal panel
@@ -165,7 +161,7 @@ pill to open the panel, click a profile pill to switch it.
 
 ## External dependencies
 
-Runs `gdbus`, `omarchy brightness`, `hyprctl`, `omarchy hw`, `upower`, and
+Runs `busctl` (part of systemd), `omarchy brightness`, `hyprctl`, `omarchy hw`, `upower`, and
 (only on hybrid-GPU hardware) `nvidia-smi` via Quickshell's `Process` — all
 standard on any Omarchy install except `nvidia-smi`, which is only invoked
 when `omarchy hw hybrid gpu` already confirms NVIDIA hardware is present.

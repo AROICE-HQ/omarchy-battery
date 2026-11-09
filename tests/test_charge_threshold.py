@@ -7,48 +7,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "charge-threshold.sh"
-MOCK = r'''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-
-args = sys.argv[1:]
-if Path(sys.argv[0]).name == "upower":
-    print("/org/freedesktop/UPower/devices/battery_mouse")
-    print("/org/freedesktop/UPower/devices/battery_macsmc_battery")
-    sys.exit(0)
-
-scenario = os.environ["SCENARIO"]
-method = args[args.index("--method") + 1]
-if method.endswith(".Set") or method.endswith(".EnableChargeThreshold") or method.endswith(".OneShotFullCharge"):
-    with open(os.environ["CALLS"], "a") as log:
-        log.write(json.dumps(args) + "\n")
-    if scenario == "denied":
-        print("Access denied", file=sys.stderr)
-        sys.exit(1)
-    print("()")
-elif args[-1] == "PowerSupply":
-    device = args[args.index("--object-path") + 1]
-    print("(<false>,)" if device.endswith("_mouse") else "(<true>,)")
-elif args[-1] == "ChargeThresholdSupported":
-    if scenario == "old-upower":
-        sys.exit(1)
-    print("(<true>,)" if scenario.startswith("upower") else "(<false>,)")
-elif args[-1] == "ChargeThresholdEnabled":
-    if scenario == "upower-read-error":
-        sys.exit(1)
-    print("(<false>,)" if scenario == "upower-disabled" else "(<true>,)")
-elif method.endswith(".SupportedProperties"):
-    if scenario == "no-daemon":
-        sys.exit(1)
-    print("(['ThrottlePolicy'],)" if scenario == "unsupported" else "(['ChargeControlEndThreshold'],)")
-elif args[-1] == "ChargeControlEndThreshold":
-    if scenario == "malformed":
-        print("invalid")
-    else:
-        print("(<byte 0x%02x>,)" % int(os.environ.get("LIMIT", "80")))
-else:
-    sys.exit(1)
-'''
+MOCK = Path(__file__).resolve().parent / "fixtures" / "mock_power_tools.py"
 
 
 class ChargeThresholdTests(unittest.TestCase):
@@ -56,17 +15,17 @@ class ChargeThresholdTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         directory = Path(self.temp.name)
-        for name in ("upower", "gdbus"):
-            tool = directory / name
-            tool.write_text(MOCK)
-            tool.chmod(0o755)
+        for name in ("upower", "busctl"):
+            (directory / name).symlink_to(MOCK)
         self.calls = directory / "calls"
+        self.limit = directory / "limit"
         self.env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
-                        SCENARIO="asus", CALLS=str(self.calls))
+                        CALLS=str(self.calls), LIMIT_FILE=str(self.limit))
 
     def run_helper(self, *args, scenario="asus", limit=80):
-        return subprocess.run(["bash", str(SCRIPT), *args],
-                              env=dict(self.env, SCENARIO=scenario, LIMIT=str(limit)),
+        self.limit.write_text(str(limit))
+        return subprocess.run([str(SCRIPT), *args],
+                              env=dict(self.env, SCENARIO=scenario),
                               capture_output=True, text=True, timeout=10)
 
     def writes(self):
@@ -79,9 +38,11 @@ class ChargeThresholdTests(unittest.TestCase):
         result = self.run_helper("set", "upower", "false", "0", scenario="upower")
         self.assertEqual(result.returncode, 0, result.stderr)
         args, = self.writes()
-        self.assertEqual(args[-1], "false")
-        self.assertIn("org.freedesktop.UPower.Device.EnableChargeThreshold", args)
-        self.assertIn("/org/freedesktop/UPower/devices/battery_macsmc_battery", args)
+        self.assertEqual(args, [
+            "call", "org.freedesktop.UPower",
+            "/org/freedesktop/UPower/devices/battery_macsmc_battery",
+            "org.freedesktop.UPower.Device", "EnableChargeThreshold", "b", "false",
+        ])
 
     def test_disabled_upower_still_available(self):
         result = self.run_helper("read", scenario="upower-disabled")
@@ -98,6 +59,10 @@ class ChargeThresholdTests(unittest.TestCase):
         result = self.run_helper("read", scenario="old-upower")
         self.assertIn("backend\tasus\n", result.stdout)
 
+    def test_asus_discovery_without_upower(self):
+        result = self.run_helper("read", scenario="upower-unavailable")
+        self.assertEqual(result.stdout, "backend\tasus\nenabled\ttrue\nlimit\t80\n")
+
     def test_unsupported_and_bad_reads_do_not_claim_support(self):
         for scenario in ("unsupported", "no-daemon", "malformed", "upower-read-error"):
             self.assertEqual(self.run_helper("read", scenario=scenario).stdout, "backend\tnone\n")
@@ -109,13 +74,20 @@ class ChargeThresholdTests(unittest.TestCase):
         result = self.run_helper("set", "asus", "false", "55", limit=55)
         self.assertEqual(result.returncode, 0, result.stderr)
         args, = self.writes()
-        self.assertEqual(args[-1], "xyz.ljones.Platform.OneShotFullCharge")
+        self.assertEqual(args, [
+            "call", "xyz.ljones.Asusd", "/xyz/ljones", "xyz.ljones.Platform", "OneShotFullCharge",
+        ])
+        self.assertEqual(self.limit.read_text(), "100")
 
     def test_restore_saved_not_hardcoded_limit(self):
         result = self.run_helper("set", "asus", "true", "55", limit=100)
         self.assertEqual(result.returncode, 0, result.stderr)
         args, = self.writes()
-        self.assertEqual(args[-3:], ["xyz.ljones.Platform", "ChargeControlEndThreshold", "<byte 55>"])
+        self.assertEqual(args, [
+            "set-property", "xyz.ljones.Asusd", "/xyz/ljones", "xyz.ljones.Platform",
+            "ChargeControlEndThreshold", "y", "55",
+        ])
+        self.assertEqual(self.limit.read_text(), "55")
 
     def test_reject_bad_restore_values_and_arguments(self):
         for value in ("0", "19", "100", "101", "80.5", "080", "80;echo unsafe", "<img>"):
@@ -140,6 +112,13 @@ class ChargeThresholdTests(unittest.TestCase):
         result = self.run_helper("set", "asus", "false", "80", scenario="denied")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Access denied", result.stderr)
+
+    def test_asus_success_reply_without_limit_change_is_an_error(self):
+        for enabled, limit in (("false", 80), ("true", 100)):
+            with self.subTest(enabled=enabled):
+                result = self.run_helper("set", "asus", enabled, "80", scenario="no-op", limit=limit)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("asusd did not apply the requested charge limit", result.stderr)
 
 
 if __name__ == "__main__":

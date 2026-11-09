@@ -90,14 +90,6 @@ function modeLabel(device, onBattery, states, thresholdEnabled) {
 }
 
 // ---- Charge-threshold toggle.
-// `gdbus call` prints a boolean property read as "(<true>,)" / "(<false>,)".
-function parseGdbusBoolean(raw) {
-  var text = String(raw || "")
-  if (text.indexOf("true") !== -1) return true
-  if (text.indexOf("false") !== -1) return false
-  return null
-}
-
 function validAsusChargeLimit(value) {
   return typeof value === "number" && isFinite(value) && Math.floor(value) === value
     && value >= 20 && value < 100 ? value : 0
@@ -186,7 +178,6 @@ if (typeof module !== "undefined") {
     chargeThresholdActive: chargeThresholdActive,
     batteryIcon: batteryIcon,
     modeLabel: modeLabel,
-    parseGdbusBoolean: parseGdbusBoolean,
     validAsusChargeLimit: validAsusChargeLimit,
     parseChargeThreshold: parseChargeThreshold,
     parseBrightnessPercent: parseBrightnessPercent,
