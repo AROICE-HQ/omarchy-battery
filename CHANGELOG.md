@@ -6,6 +6,10 @@ All notable user-facing changes to this plugin. Format loosely follows [Keep a C
 
 ### Fixed
 
+- Detect charge threshold support through UPower instead of requiring
+  numeric thresholds, enabling the toggle on Lenovo laptops and other
+  hardware with firmware-managed charge protection.
+
 - Require UPower's charge-threshold switch to be enabled before labeling a
   partly charged battery as "Holding". This avoids mistaking a battery that
   reports `fully-charged` below 99% for an active charge limit.

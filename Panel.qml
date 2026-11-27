@@ -27,6 +27,7 @@ Panel {
 
   // ---- Charge threshold toggle, Quick Dim, Travel Mode, GPU status, watts
   //      history, and application impact -- not present in the built-in widget.
+  property bool chargeThresholdSupported: false
   property bool chargeThresholdEnabled: false
   property bool quickDimActive: false
   property var quickDimSavedBrightness: null
@@ -211,18 +212,23 @@ Panel {
   // writing the sysfs threshold file directly, which is root-owned on this
   // hardware and every other laptop checked. The value itself (75-80% here)
   // is whatever UPower/firmware already has configured -- this only flips
-  // whether it's *enforced*, matching what omarchy-battery-status's
-  // "threshold" field already reports as configured.
+  // whether it's enforced. Support is detected through UPower even
+  // when no numeric threshold is exposed.
   function refreshChargeThreshold() {
-    if (!root.batteryInfo.threshold) return
+    if (chargeThresholdReadProc.running ||
+        chargeThresholdActionProc.running) return
+
     chargeThresholdReadProc.command = ["bash", "-c",
       root.chargeThresholdBatterySetup
+        + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdSupported && '
         + 'gdbus call --system --dest org.freedesktop.UPower --object-path "$battery" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdEnabled']
     chargeThresholdReadProc.running = true
   }
 
   function toggleChargeThreshold() {
-    if (chargeThresholdActionProc.running) return
+    if (!root.chargeThresholdSupported ||
+        chargeThresholdReadProc.running ||
+        chargeThresholdActionProc.running) return
     var next = !root.chargeThresholdEnabled
     chargeThresholdActionProc.command = ["bash", "-c",
       root.chargeThresholdBatterySetup
@@ -351,8 +357,16 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var value = Model.parseGdbusBoolean(text)
-        if (value !== null) root.chargeThresholdEnabled = value
+        var lines = text.trim().split("\n")
+        if (lines.length !== 2) return
+
+        var supported = Model.parseGdbusBoolean(lines[0])
+        var enabled = Model.parseGdbusBoolean(lines[1])
+
+        if (supported === null || enabled === null) return
+
+        root.chargeThresholdSupported = supported
+        root.chargeThresholdEnabled = supported && enabled
       }
     }
   }
@@ -733,12 +747,11 @@ Panel {
           }
         }
 
-        // ---------- Charge threshold toggle. Only shown once the battery
-        //            actually reports a configured threshold -- the same
-        //            gate omarchy-battery-status already applies before
-        //            printing the "threshold" field. ----------
+        // ---------- Charge threshold toggle. Detect support through
+        //            UPower, including firmware-managed charge protection
+        //            without a numeric threshold. ----------
         Item {
-          visible: !!root.batteryInfo.threshold
+          visible: root.chargeThresholdSupported
           width: parent.width
           height: visible ? chargeThresholdColumn.implicitHeight : 0
 
@@ -751,7 +764,9 @@ Panel {
 
             Toggle {
               width: parent.width
-              label: "Charge threshold"
+              label: root.batteryInfo.threshold
+                ? "Charge threshold"
+                : "Charge protection"
               description: root.batteryInfo.threshold
                 ? ("Hold at " + root.batteryInfo.threshold + " to protect battery health")
                 : "Hold charge below the firmware limit"
