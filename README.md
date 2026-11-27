@@ -52,10 +52,11 @@ Everything the built-in `omarchy.power` already has:
 New in this plugin:
 
 - **Charge-threshold toggle** — turns firmware-backed charge protection on
-  or off, at whatever start/end percentages your hardware already reports.
+  or off using the limits configured by your hardware or firmware.
   Goes through UPower's own `EnableChargeThreshold` method (the same
-  DBus/polkit path UPower ships for this), not a raw sysfs write. Only
-  shown when your battery actually reports a configured threshold.
+  DBus/polkit path UPower ships for this), not a raw sysfs write. Shown
+  whenever UPower reports charge threshold support, including hardware
+  without numeric start/end thresholds.
 - **Quick Dim** — one click drops your laptop panel to 40% brightness;
   click again to restore the exact value it was at. Reads the current
   brightness first, so a setup with no laptop panel active (docked to an
@@ -99,8 +100,8 @@ run `omarchy-shell shell rescanPlugins` if it doesn't pick up right away).
 Everything from the built-in widget works the same way — click the bar
 pill to open the panel, click a profile pill to switch it.
 
-- **Charge threshold**: flip the toggle under Power Profile. Only appears
-  if your hardware supports it.
+- **Charge threshold / Charge protection**: flip the toggle under Power
+  Profile. Only appears when UPower reports hardware support.
 - **Quick Dim** / **Travel Mode**: one click each in Quick Actions; click
   again to undo. Both are safe to leave on indefinitely — closing the
   panel or restarting the shell doesn't lose the saved state, only a
@@ -111,12 +112,13 @@ pill to open the panel, click a profile pill to switch it.
 
 ## How it works
 
-- **Charge threshold**: reads/writes UPower's `ChargeThresholdEnabled`
-  property and `EnableChargeThreshold` method via `gdbus call` against
-  `org.freedesktop.UPower`, targeting whichever battery `upower -e`
-  reports. The actual start/end percentages come from
-  `omarchy-battery-status --shell`'s existing `threshold` field — this
-  plugin only toggles enforcement, it doesn't set arbitrary percentages.
+- **Charge threshold**: reads UPower's `ChargeThresholdSupported` and
+  `ChargeThresholdEnabled` properties and calls `EnableChargeThreshold`
+  via `gdbus call` against `org.freedesktop.UPower`. Numeric limits are
+  displayed when available from `omarchy-battery-status --shell`.
+  Firmware-managed charge protection is supported even without numeric
+  thresholds. The plugin only toggles enforcement; it does not set
+  arbitrary percentages.
 - **Quick Dim / Travel Mode brightness**: `omarchy brightness display
   --monitor eDP-2`, read before changing (to know what to restore) and
   written after. A read that can't resolve a number — no internal panel
